@@ -1,5 +1,3 @@
-# C++20 The Complete Guide
-
 # Concepts,Requirements,and Constraints
 
 ## Using a requires Clause
@@ -562,4 +560,485 @@ auto add(Coll& coll, const T& val) -> decltype(coll.insert(val))
 ```
 #### std::enable_if<>
 适用于更复杂的情况，是一个type trait，接受一个布尔条件，如果条件为假，则产生无效代码，导致忽略该模板（被SFINAE掉）
+
+```C++
+//T 是浮点类型时，忽略该模板
+template<typename Coll, typename T, typtename = std::enable_if<!std::is_floating_point_v<T>>>
+void add(Coll& coll, const T& val)
+{
+  coll.push_back(val);
+}
+```
+
+## Semantic Constraints
+
+`concept` 会检查语法和语义约束：
+
+- 语法约束：能在**编译期检查**对应的要求（如，操作是否支持，该操作是否产生对应的类型等）
+- 语义约束：只能在**运行时检查**的要求（如，操作是否具有相同的效果，对于特定值执行的相同操作是否总是产生相同的结果）
+
+### Example of Semantic Constrains
+
+##### std::ranges::sized_range
+
+该 `concept` 保证了一个 range 的包含的元素个数可在$O(1)$时间内计算出来（通过size()或计算 begin 和 end 的差）。
+
+一个 `range` 类型提供了 `size()`时就默认满足这个 concept，如果要去掉限制，就需要设置`std::disable_sized_range<Rg> = true`：
+
+```C++
+class MyCont
+{
+  	...
+    std::size_t size() const // 复杂度不是O(1)
+}
+// 需要解除该 concept
+constexpr bool std::ranges::disable_sized_range<MyCont> = true;
+```
+
+##### std::ranges::range vs std::ranges::view
+
+`std::ranges::view`除了一些语法约束外，它还保证了**移动构造函数/赋值**、**复制构造函数/赋值**（如果可用）和**析构函数**具有$O(1)$复杂度。
+
+自定义`range`可以通过`public`继承 `std::ranges::view_base` 或` std::ranges::view_interface<> `，或者通过将模板特化 `std::ranges::enable_view<Rg>` 设置为 `true` 来提供相应的保证。
+
+##### std::invocable vs std::regular_invocable
+
+`std::invocable`保证了 it be called with `std::invoke`
+
+```C++
+template<typename F, typename... Args>
+concept invocable = requires(F&& f, Args&&... args)
+{
+  	std::invoke(std::forward<F>(f), std::forward<Args>(args)...);
+};
+
+vod PrintVec(const std::vector<int>& vec, invocable<int> auto fn)
+{
+  	for(auto& elem : vec)
+    		std::cout << fn(elem) << '\n';
+}
+std::vector<int> vec{1, 2, 3};
+PrintVec(vec, [](int v) -> int { return -v; });
+```
+
+> `invocable<int> auto fn`此处`int`指定的是返回值类型第一个模板参数 `F`编译期通过 `fn`自动推断，无需添加。
+
+`td::regular_invocable`添加了要求：必须是纯函数, 相同输入产生相同输出，这是**语义**上的要求，**编译期无法检查出来**。
+
+```C++
+// fn不是纯函数
+auto fn = [i=0](int a) mutable { return a + ++i; };
+// 编译期断言无法检查出来
+static_assert(std::invocable<decltype(fn), int>);	// ok
+static_assert(std::regular_invocable<decltype(fn), int>); // ok
+// 但是连续两次调用fn会产生不同结果，这只能在运行时判断
+fn(10) != fn(10) // true
+
+```
+
+##### std::weakly_incrementable vs. std::incrementable
+
+- `incrementable` 要求相同值的每次递增都产生相同的结果。
+- `weakly_incrementable` 仅要求类型支持递增运算符。递增相同的值可能会产生不同的结果。
+
+因此：
+
+- 当满足` incrementable `时，可以从**一个起始值多次迭代一个范围**。
+- 当只满足 `weakly_incrementable` 时，您只能**对一个范围进行一次迭代**。**使用相同的起始值进行第二次迭代可能会产生不同的结果**。
+
+**输入流迭代器**只能迭代一次，下次迭代会产生不同的值，满足`weakly_incrementable` 。这都是语义上的限制，只能通过**不同的函数签名来区分**：
+
+```C++
+std::weakly_incrementable<std::istream_iterator<int>> // 返回 true 
+std::incrementable<std::istream_iterator<int>> // 也返回 true 但语义上是 false 编译期无法判断
+  
+// single-pass algorithm
+// 可传递流迭代器
+template<std::weakly_incrementable T> 
+void algo1(T beg, T end); 
+
+// multi-pass algorithm 
+// 不能传递流迭代器给该函数
+template<std::incrementable T> 
+void algo2(T beg, T end);
+
+algo1(std::istream_iterator<int>{std::cin}, std::istream_iterator<int>{}); // Ok
+algo2(std::istream_iterator<int>{std::cin}, std::istream_iterator<int>{}); // Bad
+
+```
+
+不能通过**编译期的 **`concept` 来区分，下面的写法就是错的，因为语法上无法区分二者：
+
+```C++
+template<std::weakly_incrementable T> 
+void algo(T beg, T end);
+
+template<std::incrementable T> 
+void algo(T beg, T end);
+
+```
+
+对于这种语义上的差异，可使用`iterator concepts`来区分：
+
+```C++
+template<std::input_iterator T> 
+void algo(T beg, T end);	// single-pass algorithm
+template<std::forward_iterator T> 
+void algo(T beg, T end);  // multi-pass algorithm  
+// Ok: overload resolution select the single-pass algorithm
+algo(std::istream_iterator<int>{std::cin}, std::istream_iterator<int>{});
+```
+
+## Design Guidelines for Concepts
+
+`concept`是 subsumption 的，意味着一个 `concept` 可以是另一个 `concept` 的子集。优先使用 `concept` 而不是`type traits`、编译期表达式等。
+
+```C++
+template<typename T, typename U> 
+requires std::is_same_v<T, U> // using traits 
+void foo(T, U) 
+{ 
+  	std::cout << "foo() for parameters of same type" << '\n'; 
+}
+
+template<typename T, typename U> 
+requires std::is_same_v<T, U> && std::is_integral_v<T> 
+void foo(T, U) 
+{ 
+  	std::cout << "foo() for integral parameters of same type" << '\n'; 
+}
+
+foo(1, 2); // ERROR: ambiguity: both requirements are true
+```
+
+两个 requires 表达式都为 true，重载决议无法得到它们的优先级。
+
+使用 `concept`，编译器会优先选择第二个版本：
+
+```C++
+template<typename T, typename U> 
+requires std::same_as<T, U> // using concepts 
+void foo(T, U) 
+{ 
+  	std::cout << "foo() for parameters of same type" << '\n'; 
+}
+
+template<typename T, typename U> 
+requires std::same_as<T, U> && std::integral<T> 
+void foo(T, U) 
+{ 
+  	std::cout << "foo() for integral parameters of same type" << '\n'; 
+}
+
+foo(1, 2); // OK: second foo() preferred
+```
+
+# Concepts, Requirements, and Constraints in Detail
+
+## Constraints
+
+为了指定泛型参数的requirements，需要使用constraints来在编译期决定是否实例化模板。可以constrain:
+
+- function templates
+- class templates
+- variable templates
+- alias templates
+
+使用`requires`子句来定义constraint：
+
+```C++
+template<typename T>
+void foo(const T& arg) requires MyConcept<T>
+{...}
+```
+
+也能在模板参数或 `auto` 前面使用`concept`来为类型添加 constraint：
+
+```C++
+template<MyConcept T>
+void foo(const T& arg)
+{...}
+
+// same use auto
+void foo(const MyConcept auto& arg)
+{...}
+```
+
+## requires Clauses
+
+`requires` 子使用 `requires` 关键字和编译期 `bool `表达式来限制模板，bool 表达式可以是：
+
+- Ad-hoc bool 表达式
+- concept
+- requires expression
+
+使用 bool 表达式的地方，也可以使用 constraints 
+
+### Using && and || in requires Clauses
+
+在 requires 子句中组合多个 constraints：
+
+```C++
+template<typename T>
+requires (sizeof(T) > 4)		// 编译期 bool 表达式
+					&& requires { typename T::value_type;}	// requires 表达式
+					&& std::input_iterator<T>	// concept
+void foo(T x) {...}
+
+template<typename T>
+requires std::integral<T> || std::floating_point<T>
+T power(T b, T p);
+```
+
+## Ad-hoc Boolean Expressions
+
+requires子句中可包含的表达式有：
+
+- Type predicates, such as type traits
+- Compile-time variables (defined with constexpr or constinit)
+- Compile-time functions (defined with constexpr or consteval)
+
+```C++
+template<typename T> 
+requires (sizeof(int) != sizeof(long)) 
+...
+
+template<typename T, std::size_t Sz> 
+requires (Sz > 0) 
+...
+
+template<typename T> 
+constexpr bool gcd(T a, T b); // greatest common divisor (forward declaration)
+
+template<typename T, int Min, int Max> 
+requires (gcd(Min, Max) > 1) // available if there is a GCD greater than 1 
+...
+```
+
+
+
+## requires Expressions
+
+requires表达式提供了更灵活的方法，对一个或多个模板参数指定多个要求，可以是：
+
+- Required type definitions
+
+- Expressions that have to be valid
+
+- Requirements on the types that expressions yield
+
+```C++
+template<typename Coll>
+... requires {
+  typename Coll::value_type::first_type;		// elements have first_type
+  typename Coll::value_type::second_type;		// elements have second_type
+}
+```
+
+可选参数列表，引入了**虚拟参数**来表达 requirements：
+
+```C++
+template<typename T>
+...
+requires(T x, T y)
+{
+  	x + y;	// 支持+
+  	x - y;	// 支持-
+}
+```
+
+虚拟参数永远不会被实参替换，所以声明为值还是引用并不影响。
+
+虚拟参数类型还可以依赖模板参数类型：
+
+```C++
+template<typename Coll>
+...
+requires(Coll::value_type v)	// 检查Call::value_type是否有效，此处不必使用typename前缀
+{
+ 		st::cout << v;		// 支持输出
+}
+
+// 只检查是否有value_type
+template<typename Coll>
+...
+requires(Coll::value_type v)	// 检查Call::value_type是否有效
+{
+ 		true;   // 花括号内不能为空，所以写个 ture 就行
+}
+```
+
+### Simple Requirements
+
+形式良好的表达式，如果调用它们必须保证编译通过。但实际上并不会执行，所以结果不重要：
+
+```C++
+template<typename T1, typename T2>
+...
+requires(T1 val, T2 p)
+{
+  	*p;						// T2支持 operator*
+  	p[0];					// 支持operator[int]
+  	p->value();		// 具有成员函数 value()
+  	*p > val;			// 支持 operator*的结果与 val 比较
+  	p == nullptr	// 支持与 nullptr 比较
+}
+```
+
+> `p == nullptr`不是要求 p 是空指针
+>
+> `*p > val || p == nullptr`表示可以用||组合两个子表达式的结果
+
+如果要求支持两个子表达式中的任意一个，必须：
+
+```C++
+template<typename T1, typename T2>
+...
+requires(T1 val, T2 p)
+{
+  	*p > val;	  // 支持 operator* 的结果与 T1 的比较 
+}
+||	// 或者
+requires(T2 p)
+{
+  	p == nullptr;// 支持 T2 与 nullptr 的比较 
+}
+```
+
+注意，下面的 `concept`并不是要求 `T` 是整数类型：
+
+```C++
+template<typename T>
+...
+requires
+{
+  	std::integral<T>;	//要求该表达式是合法的（其实对所有类型T都合法）
+}
+```
+
+如果要求 `T `是整数类型，则要这样：
+
+```C++
+template<typename T> 
+... 
+std::integral<T> && // 正确，要求 T 是整数类型
+requires 
+{ 
+    ...
+};
+
+//或者
+template<typename T> 
+... 
+requires 
+{ 
+    requires std::integral<T>; // 正确，要求 T 是整数类型
+    ... 
+};
+
+
+```
+
+### Type Requirements
+
+保证类型名称是有效的：
+
+```C++
+template<typename T1, typename T2>
+...
+requires
+{
+  	typename T1::value_type; 							// T1 需要有成员类型 value_type 
+    typename std::ranges::iterator_t<T1>; // T1 需要有迭代器类型 
+    typename std::common_type_t<T1, T2>; 	// T1 和 T2 需要有公共类型 
+}
+
+// 实例
+template<std::integral T> 
+class MyType1 
+{ 
+    //...
+};
+template<typename T> 
+requires requires 
+{ 
+    typename MyType1<T>; // instantiation of MyType1 for T would be valid
+} 
+void mytype1(T) 
+{ 
+    ...
+}
+// OK
+mytype1(42); 
+// ERROR
+mytype1(7.7);
+
+```
+
+如果 `T`是 `void`，则**满足任何的类型要求**。
+
+下面的 `concept` 并不是检查类型 `T` 是否存在 `hash` 函数：
+
+```C++
+template<typename T> 
+concept StdHash = requires 
+{ 
+    typename std::hash<T>; // 不检查 std::hash<> 是否为类型 T 定义 
+};
+```
+
+应该尝试创建对象：
+
+```C++
+template<typename T> 
+concept StdHash = requires 
+{ 
+    std::hash<T>{}; // OK，检查是否可以为类型 T 创建一个标准哈希函数 
+};
+```
+
+使用产生值或产生类型的类型函数是无意义的，因为它总能产生一个值或类型，永远是合法的：
+
+```C++
+template<typename T> 
+... 
+requires 
+{ 
+    std::is_const_v<T>; // 没用：总是合法的（值是什么无关紧要）
+}
+
+template<typename T> 
+... 
+requires 
+{ 
+    typename std::remove_const_t<T>; // 没用：总是合法的（总是会产生一个类型）
+}
+// 正确做法
+// 应该放在花括号外面
+template<typename T> 
+... std::is_const_v<T>	// ok.  ensure T is const
+
+```
+
+使用可能具有未定义行为的类型函数也是没有意义的。例如，type traits `std::make_unsigned<>` 要求传递的参数是除了 `bool` 之外的整数类型。如果传递的类型不是整数类型，则会导致未定义行为：
+
+```C++
+template<typename T> 
+... 
+requires 
+{ 
+    std::make_unsigned<T>::type; 	// 有效或未定义行为
+}
+// 正确做法
+// 嵌套requires
+template<typename T> 
+... 
+requires 
+{ 
+    requires (std::integral<T> && !std::same_as<T, bool>); 
+    std::make_unsigned<T>::type; // OK 
+}
+
+
+```
 
